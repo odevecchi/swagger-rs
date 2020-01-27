@@ -2,11 +2,13 @@
 //! to a wrapped service.
 
 use crate::context::ContextualPayload;
-use futures::Future;
 use hyper;
-use hyper::{Error, Request};
-use std::io;
+use hyper::Request;
 use std::marker::PhantomData;
+use std::future::Future;
+use std::task::Poll;
+use std::pin::Pin;
+use futures::future::FutureExt;
 
 /// Middleware wrapper service that drops the context from the incoming request
 /// and passes the plain `hyper::Request` to the wrapped service.
@@ -53,35 +55,25 @@ where
     }
 }
 
-impl<'a, SC, RC, T, S, F> hyper::service::MakeService<&'a SC> for DropContextMakeService<T, RC>
+impl<Inner, Context, Target> hyper::service::Service<Target> for DropContextMakeService<Inner, Context>
 where
-    RC: Send + 'static,
-    T: hyper::service::MakeService<
-        &'a SC,
-        ReqBody = hyper::Body,
-        ResBody = hyper::Body,
-        Error = Error,
-        MakeError = io::Error,
-        Service = S,
-        Future = F,
-    >,
-    T::Future: 'static,
-    S: hyper::service::Service<ReqBody = hyper::Body, ResBody = hyper::Body, Error = Error>
-        + 'static,
-    F: Future<Item = S, Error = io::Error>,
+    Context: Send + 'static,
+    Inner: hyper::service::Service<Target>,
+    Inner::Future: 'static,
 {
-    type ReqBody = ContextualPayload<hyper::Body, RC>;
-    type ResBody = hyper::Body;
-    type Error = Error;
-    type MakeError = io::Error;
-    type Future = Box<dyn Future<Item = Self::Service, Error = io::Error>>;
-    type Service = DropContextService<S, RC>;
+    type Response = DropContextService<Inner::Response, Context>;
+    type Error = Inner::Error;
+    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>>>>;
 
-    fn make_service(&mut self, service_ctx: &'a SC) -> Self::Future {
-        Box::new(
+    fn poll_ready(&mut self, cx: &mut std::task::Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.inner.poll_ready(cx)
+    }
+
+    fn call(&mut self, target: Target) -> Self::Future {
+        Box::pin(
             self.inner
-                .make_service(service_ctx)
-                .map(DropContextService::new),
+                .call(target)
+                .map(|s| Ok(DropContextService::new(s?)))
         )
     }
 }
@@ -93,7 +85,6 @@ where
 pub struct DropContextService<T, C>
 where
     C: Send + 'static,
-    T: hyper::service::Service<ReqBody = hyper::Body, ResBody = hyper::Body, Error = Error>,
 {
     inner: T,
     marker: PhantomData<C>,
@@ -102,7 +93,6 @@ where
 impl<T, C> DropContextService<T, C>
 where
     C: Send + 'static,
-    T: hyper::service::Service<ReqBody = hyper::Body, ResBody = hyper::Body, Error = Error>,
 {
     /// Create a new DropContextService struct wrapping a value
     pub fn new(inner: T) -> Self {
@@ -112,17 +102,21 @@ where
         }
     }
 }
-impl<T, C> hyper::service::Service for DropContextService<T, C>
-where
-    C: Send + 'static,
-    T: hyper::service::Service<ReqBody = hyper::Body, ResBody = hyper::Body, Error = Error>,
-{
-    type ReqBody = ContextualPayload<hyper::Body, C>;
-    type ResBody = hyper::Body;
-    type Error = Error;
-    type Future = T::Future;
 
-    fn call(&mut self, req: Request<Self::ReqBody>) -> Self::Future {
+impl<Inner, Body, Context> hyper::service::Service<Request<ContextualPayload<Body, Context>>> for DropContextService<Inner, Context>
+where
+    Context: Send + 'static,
+    Inner: hyper::service::Service<Request<Body>>,
+{
+    type Response = Inner::Response;
+    type Error = Inner::Error;
+    type Future = Inner::Future;
+
+    fn poll_ready(&mut self, cx: &mut std::task::Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.inner.poll_ready(cx)
+    }
+
+    fn call(&mut self, req: Request<ContextualPayload<Body, Context>>) -> Self::Future {
         let (head, body) = req.into_parts();
         let body = body.inner;
         self.inner.call(Request::from_parts(head, body))

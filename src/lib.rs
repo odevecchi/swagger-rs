@@ -21,14 +21,14 @@ pub use context::{
 };
 
 /// Module to support client middleware
-pub mod client;
+// TODO pub mod client;
 
 /// Module with utilities for creating connectors with hyper.
 pub mod connector;
 pub use connector::{http_connector, https_connector, https_mutual_connector};
 
-pub mod composites;
-pub use composites::{CompositeMakeService, CompositeService, NotFound};
+//pub mod composites;
+//pub use composites::{CompositeMakeService, CompositeService, NotFound};
 
 pub mod add_context;
 pub use add_context::{AddContextMakeService, AddContextService};
